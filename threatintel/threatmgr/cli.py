@@ -22,6 +22,8 @@ from .matcher import Matcher
 from . import feeds as feedmod
 from . import server as srv
 from . import ingest as ing
+from .correlator import Correlator
+from .dispatch import Notifier
 
 
 def _store(args) -> Store:
@@ -55,13 +57,39 @@ def cmd_watch(args):
     srv.serve(store, host=args.host, port=args.port)
 
 
+def _build_notifier(args):
+    n = Notifier.from_args(args)
+    return n if n.enabled else None
+
+
 def cmd_ingest(args):
     """Run as a syslog server: ingest logs from devices and match in real time."""
+    correlator = None if args.no_correlate else Correlator()
+    notifier = _build_notifier(args)
     ing.serve_syslog(
         _store(args), host=args.host, port=args.port,
         udp=not args.tcp_only, tcp=not args.udp_only,
         echo=not args.quiet, reload_every=args.reload_every,
+        correlator=correlator, notifier=notifier,
     )
+
+
+def cmd_test_alert(args):
+    """Send a synthetic alert through the configured dispatch channels."""
+    n = Notifier.from_args(args)
+    n.min = 0  # force-send regardless of severity gate
+    if not n.enabled:
+        print("No dispatch channel configured. Set --webhook / THREATMGR_WEBHOOK "
+              "or SMTP flags + THREATMGR_SMTP_PASSWORD.")
+        return
+    n.notify({
+        "observable": "203.0.113.66", "threat": "ThreatMgr dispatch test",
+        "severity": "critical", "source": "test-alert", "ioc_type": "ip",
+        "context": "synthetic alert to verify delivery",
+    })
+    print("Test alert sent via:",
+          ", ".join(c for c, on in [("webhook", n.webhook_url),
+                                     ("email", n.smtp_host and n.mail_to)] if on))
 
 
 def cmd_scan(args):
@@ -137,6 +165,20 @@ def main(argv=None):
     w.add_argument("--port", type=int, default=8787)
     w.set_defaults(func=cmd_watch)
 
+    def add_alert_flags(sp):
+        g = sp.add_argument_group("alert dispatch")
+        g.add_argument("--webhook", help="webhook URL (Slack-compatible); "
+                       "or set THREATMGR_WEBHOOK")
+        g.add_argument("--min-severity", default="high",
+                       choices=["low", "medium", "high", "critical"],
+                       help="minimum severity to dispatch (default high)")
+        g.add_argument("--smtp-host", help="SMTP server for email alerts")
+        g.add_argument("--smtp-port", type=int, default=587)
+        g.add_argument("--smtp-user", help="SMTP username")
+        g.add_argument("--smtp-ssl", action="store_true", help="use SMTPS (implicit TLS)")
+        g.add_argument("--mail-from", help="email From address")
+        g.add_argument("--mail-to", help="email To address (enables email dispatch)")
+
     ig = sub.add_parser("ingest", help="run a syslog server; ingest device logs and match live")
     ig.add_argument("--host", default="0.0.0.0", help="bind address (default: all interfaces)")
     ig.add_argument("--port", type=int, default=5140,
@@ -146,7 +188,14 @@ def main(argv=None):
     ig.add_argument("--quiet", action="store_true", help="don't echo alerts to stdout")
     ig.add_argument("--reload-every", type=int, default=300,
                     help="seconds between CIDR cache refreshes (default 300)")
+    ig.add_argument("--no-correlate", action="store_true",
+                    help="disable the correlation/threshold rules")
+    add_alert_flags(ig)
     ig.set_defaults(func=cmd_ingest)
+
+    ta = sub.add_parser("test-alert", help="send a synthetic alert to verify dispatch")
+    add_alert_flags(ta)
+    ta.set_defaults(func=cmd_test_alert)
 
     sc = sub.add_parser("scan", help="scan log file(s) against the IOC store")
     sc.add_argument("files", nargs="+")

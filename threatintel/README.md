@@ -94,6 +94,48 @@ picked up without a restart.
 
 > Ports below 1024 (e.g. 514) require root. The default 5140 avoids that.
 
+## Correlation / threshold rules (behavioural detection)
+
+IOC matching catches contact with *known* bad infrastructure. The correlation
+engine (`correlator.py`) catches *behaviour* no single line reveals — it keeps
+per-source sliding time windows and fires when a threshold is crossed. Built-in
+rules:
+
+| rule | fires when | default |
+|------|-----------|---------|
+| `ssh_bruteforce` | failed logins from one source IP | ≥5 in 60s |
+| `port_scan` | one source hits many distinct dest ports | ≥15 ports in 30s |
+| `web_bruteforce` | repeated 401/403 on login URLs from one IP | ≥20 in 60s |
+| `denied_burst` | firewall denies from one source | ≥50 in 60s |
+
+Correlation runs automatically inside `ingest`. Disable with `--no-correlate`.
+Add or tune rules in `threatmgr/correlator.py` (each is a `ThresholdRule` with a
+match regex, a key regex, a threshold and a window).
+
+## Outbound alert dispatch (webhook / Slack / email)
+
+Push high-severity alerts out in real time (`dispatch.py`). Secrets come from the
+environment, never from flags on disk.
+
+```bash
+# Slack / generic webhook
+export THREATMGR_WEBHOOK='https://hooks.slack.com/services/XXX/YYY/ZZZ'
+python -m threatmgr ingest --min-severity high
+
+# Email (password from env)
+export THREATMGR_SMTP_PASSWORD='app-password'
+python -m threatmgr ingest \
+  --smtp-host smtp.gmail.com --smtp-port 587 \
+  --smtp-user soc@example.com --mail-from soc@example.com \
+  --mail-to soc-team@example.com --min-severity critical
+
+# Verify delivery without waiting for a real alert
+python -m threatmgr test-alert --webhook "$THREATMGR_WEBHOOK"
+```
+
+`--min-severity` (low|medium|high|critical) gates what gets dispatched. Dispatch
+failures are logged and never interrupt ingestion.
+
 ## Proactive monitoring from the CLI
 
 ```bash
@@ -152,6 +194,8 @@ threatintel/
 │   ├── collector.py   concurrent fetch → parse → upsert
 │   ├── matcher.py     observable extraction + IOC matching (detection)
 │   ├── ingest.py      syslog server (UDP/TCP) — ingest device logs live
+│   ├── correlator.py  threshold/correlation rules (brute force, scans, bursts)
+│   ├── dispatch.py    outbound alerts (webhook / Slack / email)
 │   ├── server.py      web console + JSON API
 │   └── cli.py         command-line entry point
 └── README.md

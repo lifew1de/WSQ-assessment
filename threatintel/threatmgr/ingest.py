@@ -19,6 +19,8 @@ import time
 
 from .store import Store
 from .matcher import Matcher
+from .correlator import Correlator
+from .dispatch import Notifier
 
 # strip a leading syslog priority like "<134>" and an optional version digit
 _PRI_RE = re.compile(r"^<\d{1,3}>\d?\s*")
@@ -39,10 +41,13 @@ class _Stats:
 
 
 class _Engine:
-    """Shared matcher + stats, with periodic CIDR reload for long-running use."""
-    def __init__(self, store: Store, reload_every: int = 300, echo: bool = True):
+    """Shared matcher + correlator + notifier, with periodic CIDR reload."""
+    def __init__(self, store: Store, reload_every: int = 300, echo: bool = True,
+                 correlator: Correlator = None, notifier: Notifier = None):
         self.store = store
         self.matcher = Matcher(store)
+        self.correlator = correlator
+        self.notifier = notifier
         self.stats = _Stats()
         self.echo = echo
         self._last_reload = time.time()
@@ -55,15 +60,30 @@ class _Engine:
         if not line:
             return
         self._maybe_reload()
-        alerts = self.matcher.scan_line(line, context=f"[{device}] {line[:400]}")
-        self.stats.record(device, len(alerts))
-        if self.echo and alerts:
-            for a in alerts:
-                ioc = a["ioc"]
-                print(f"  [ALERT] {device:<15} {a['observable']:<38} "
-                      f"{(ioc.get('severity') or '').upper():<9} "
-                      f"{ioc.get('threat','')} (src={ioc.get('source')})",
-                      flush=True)
+        n = 0
+        # 1) IOC matches (contact with known-bad infrastructure)
+        for a in self.matcher.scan_line(line, context=f"[{device}] {line[:400]}"):
+            self._emit(a["observable"], a["ioc"], f"[{device}] {line[:400]}")
+            n += 1
+        # 2) correlation (behavioural patterns across many lines)
+        if self.correlator:
+            for ev in self.correlator.observe(line, device):
+                self.store.add_alert(ev["observable"], ev["ioc"], ev["context"])
+                self._emit(ev["observable"], ev["ioc"], ev["context"])
+                n += 1
+        self.stats.record(device, n)
+
+    def _emit(self, observable: str, ioc: dict, context: str):
+        if self.echo:
+            print(f"  [ALERT] {str(context.split(']')[0].strip('[')):<15} "
+                  f"{observable:<38} {(ioc.get('severity') or '').upper():<9} "
+                  f"{ioc.get('threat','')} (src={ioc.get('source')})", flush=True)
+        if self.notifier:
+            self.notifier.notify({
+                "observable": observable, "threat": ioc.get("threat"),
+                "severity": ioc.get("severity"), "source": ioc.get("source"),
+                "ioc_type": ioc.get("ioc_type"), "context": context,
+            })
 
     def _maybe_reload(self):
         now = time.time()
@@ -100,8 +120,10 @@ class _TCPServer(socketserver.ThreadingTCPServer):
 
 def serve_syslog(store: Store, host: str = "0.0.0.0", port: int = 5140,
                  udp: bool = True, tcp: bool = True, echo: bool = True,
-                 reload_every: int = 300):
-    engine = _Engine(store, reload_every=reload_every, echo=echo)
+                 reload_every: int = 300, correlator: Correlator = None,
+                 notifier: Notifier = None):
+    engine = _Engine(store, reload_every=reload_every, echo=echo,
+                     correlator=correlator, notifier=notifier)
     servers = []
 
     if udp:
@@ -123,8 +145,14 @@ def serve_syslog(store: Store, host: str = "0.0.0.0", port: int = 5140,
         threads.append(th)
         print(f"[ingest] syslog {proto} listening on {host}:{port}")
 
-    print("[ingest] shipping logs here will be matched against threat intel. "
-          "Ctrl-C to stop.")
+    extras = []
+    if correlator:
+        extras.append(f"{len(correlator.rules)} correlation rule(s)")
+    if notifier and notifier.enabled:
+        extras.append("alert dispatch ON")
+    print("[ingest] matching against threat intel"
+          + (" + " + " + ".join(extras) if extras else "")
+          + ". Ctrl-C to stop.")
 
     # periodic throughput line
     try:
