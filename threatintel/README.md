@@ -63,6 +63,37 @@ python -m threatmgr watch --interval 3600
 Then open <http://127.0.0.1:8787>. The console shows live counts, lets you
 search IOCs, scan pasted log lines, and acknowledge alerts.
 
+## Run as a log server (syslog ingestion)
+
+Turn ThreatMgr into a network log server that devices ship to. Every received
+line is matched against the intel in real time and hits become alerts.
+
+```bash
+# Listen for syslog on UDP+TCP (default port 5140, all interfaces)
+python -m threatmgr ingest
+
+# Classic syslog port 514 (needs root/sudo)
+sudo python -m threatmgr ingest --port 514
+
+# UDP only, quieter
+python -m threatmgr ingest --udp-only --quiet
+```
+
+Point your devices at `udp://<this-host>:5140` (or TCP). Examples:
+
+- **Linux rsyslog** — in `/etc/rsyslog.d/threatmgr.conf`:
+  `*.*  @<host>:5140`  (one `@` = UDP, `@@` = TCP), then restart rsyslog.
+- **Cisco ASA / IOS** — `logging host <host> udp 5140`
+- **pfSense / OPNsense** — Status ▸ System Logs ▸ Settings ▸ Remote Logging → `<host>:5140`
+- **Fortinet / Palo Alto** — add a syslog server pointing at `<host>:5140`
+
+Run the console (`serve`) against the **same `--db`** in another terminal to watch
+alerts stream into the dashboard. The syslog engine refreshes its CIDR cache
+every few minutes (`--reload-every`), so IOCs added by later `collect` runs are
+picked up without a restart.
+
+> Ports below 1024 (e.g. 514) require root. The default 5140 avoids that.
+
 ## Proactive monitoring from the CLI
 
 ```bash
@@ -120,6 +151,7 @@ threatintel/
 │   ├── store.py       SQLite IOC index, feed metadata, alerts
 │   ├── collector.py   concurrent fetch → parse → upsert
 │   ├── matcher.py     observable extraction + IOC matching (detection)
+│   ├── ingest.py      syslog server (UDP/TCP) — ingest device logs live
 │   ├── server.py      web console + JSON API
 │   └── cli.py         command-line entry point
 └── README.md

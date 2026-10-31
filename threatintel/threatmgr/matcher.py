@@ -60,6 +60,10 @@ class Matcher:
                 continue
         return nets
 
+    def reload(self):
+        """Refresh the in-memory CIDR cache (call after a new collection)."""
+        self._cidrs = self._load_cidrs()
+
     def check(self, observable: str) -> List[dict]:
         hits = self.store.lookup(observable)
         # CIDR containment check for IPs

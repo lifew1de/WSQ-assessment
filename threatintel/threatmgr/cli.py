@@ -21,6 +21,7 @@ from .collector import collect_once
 from .matcher import Matcher
 from . import feeds as feedmod
 from . import server as srv
+from . import ingest as ing
 
 
 def _store(args) -> Store:
@@ -52,6 +53,15 @@ def cmd_watch(args):
 
     threading.Thread(target=loop, daemon=True).start()
     srv.serve(store, host=args.host, port=args.port)
+
+
+def cmd_ingest(args):
+    """Run as a syslog server: ingest logs from devices and match in real time."""
+    ing.serve_syslog(
+        _store(args), host=args.host, port=args.port,
+        udp=not args.tcp_only, tcp=not args.udp_only,
+        echo=not args.quiet, reload_every=args.reload_every,
+    )
 
 
 def cmd_scan(args):
@@ -126,6 +136,17 @@ def main(argv=None):
     w.add_argument("--host", default="127.0.0.1")
     w.add_argument("--port", type=int, default=8787)
     w.set_defaults(func=cmd_watch)
+
+    ig = sub.add_parser("ingest", help="run a syslog server; ingest device logs and match live")
+    ig.add_argument("--host", default="0.0.0.0", help="bind address (default: all interfaces)")
+    ig.add_argument("--port", type=int, default=5140,
+                    help="syslog port (default 5140; use 514 to run as root)")
+    ig.add_argument("--udp-only", action="store_true", help="listen UDP only")
+    ig.add_argument("--tcp-only", action="store_true", help="listen TCP only")
+    ig.add_argument("--quiet", action="store_true", help="don't echo alerts to stdout")
+    ig.add_argument("--reload-every", type=int, default=300,
+                    help="seconds between CIDR cache refreshes (default 300)")
+    ig.set_defaults(func=cmd_ingest)
 
     sc = sub.add_parser("scan", help="scan log file(s) against the IOC store")
     sc.add_argument("files", nargs="+")
