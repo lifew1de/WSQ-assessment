@@ -24,6 +24,8 @@ from . import server as srv
 from . import ingest as ing
 from .correlator import Correlator
 from .dispatch import Notifier
+from .suppression import SuppressionList
+from .sink import Deduper
 
 
 def _store(args) -> Store:
@@ -66,11 +68,18 @@ def cmd_ingest(args):
     """Run as a syslog server: ingest logs from devices and match in real time."""
     correlator = None if args.no_correlate else Correlator()
     notifier = _build_notifier(args)
+    deduper = None if args.no_dedup else Deduper(window=args.dedup_window)
+    try:
+        suppression = SuppressionList.from_file(args.suppress_file)
+    except (OSError, ValueError) as e:
+        print(f"[ingest] could not load suppression file: {e}")
+        return
     ing.serve_syslog(
         _store(args), host=args.host, port=args.port,
         udp=not args.tcp_only, tcp=not args.udp_only,
         echo=not args.quiet, reload_every=args.reload_every,
         correlator=correlator, notifier=notifier,
+        suppression=suppression, deduper=deduper,
     )
 
 
@@ -190,6 +199,12 @@ def main(argv=None):
                     help="seconds between CIDR cache refreshes (default 300)")
     ig.add_argument("--no-correlate", action="store_true",
                     help="disable the correlation/threshold rules")
+    ig.add_argument("--dedup-window", type=int, default=300,
+                    help="seconds to collapse duplicate alerts into one (default 300)")
+    ig.add_argument("--no-dedup", action="store_true",
+                    help="disable alert deduplication")
+    ig.add_argument("--suppress-file",
+                    help="JSON file of suppression (allowlist/mute) rules")
     add_alert_flags(ig)
     ig.set_defaults(func=cmd_ingest)
 

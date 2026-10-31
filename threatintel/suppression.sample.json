@@ -1,0 +1,10 @@
+[
+  {"type": "cidr",          "match": "10.0.0.0/8",      "note": "internal RFC1918"},
+  {"type": "cidr",          "match": "192.168.0.0/16",  "note": "corporate LAN"},
+  {"type": "value",         "match": "8.8.8.8",         "note": "Google public DNS"},
+  {"type": "value",         "match": "1.1.1.1",         "note": "Cloudflare DNS"},
+  {"type": "source",        "match": "denied_burst",    "note": "too noisy on this network"},
+  {"type": "value_regex",   "match": "^scanner\\d+\\.corp\\.example$", "note": "authorized vuln scanners"},
+  {"type": "severity_below","match": "medium",          "note": "drop low-severity hits"},
+  {"type": "cidr",          "match": "203.0.113.0/24",  "until": 1767225600, "note": "maintenance window on partner range (expires)"}
+]

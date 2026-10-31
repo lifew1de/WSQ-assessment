@@ -117,7 +117,7 @@ async function loadIocs(){const q=$('#q').value,t=$('#type').value,sv=$('#sev').
 
 async function loadAlerts(){const rows=await j('/api/alerts?open=1');
   $('#alerts').innerHTML=rows.map(r=>`<tr><td class=mono>${fmt(r.ts)}</td>
-    <td class=hit>${esc(r.observable)}</td><td>${esc(r.threat)}</td>
+    <td class=hit>${esc(r.observable)}${r.count>1?` <span class="badge medium">×${r.count}</span>`:''}</td><td>${esc(r.threat)}</td>
     <td>${badge(r.severity)}</td><td>${r.source}</td>
     <td><button onclick="ack(${r.id})">ack</button></td></tr>`).join('')
     ||'<tr><td colspan=6 class=clean>no open alerts</td></tr>';}

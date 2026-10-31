@@ -47,8 +47,9 @@ def extract_observables(line: str) -> set:
 
 
 class Matcher:
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, sink=None):
         self.store = store
+        self.sink = sink            # optional AlertSink (suppression + dedup + dispatch)
         self._cidrs = self._load_cidrs()
 
     def _load_cidrs(self):
@@ -78,9 +79,16 @@ class Matcher:
 
     def scan_line(self, line: str, context: str = "") -> List[dict]:
         alerts = []
+        ctx = context or line.strip()[:500]
         for obs in extract_observables(line):
             for ioc in self.check(obs):
-                alert_id = self.store.add_alert(obs, ioc, context or line.strip()[:500])
+                if self.sink is not None:
+                    # pipeline handles suppression, dedup, store and dispatch
+                    alert_id = self.sink.handle(obs, ioc, ctx)
+                    if alert_id is None:
+                        continue            # suppressed or deduplicated
+                else:
+                    alert_id = self.store.add_alert(obs, ioc, ctx)
                 alerts.append({"alert_id": alert_id, "observable": obs, "ioc": ioc})
         return alerts
 

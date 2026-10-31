@@ -21,6 +21,8 @@ from .store import Store
 from .matcher import Matcher
 from .correlator import Correlator
 from .dispatch import Notifier
+from .sink import AlertSink, Deduper
+from .suppression import SuppressionList
 
 # strip a leading syslog priority like "<134>" and an optional version digit
 _PRI_RE = re.compile(r"^<\d{1,3}>\d?\s*")
@@ -41,15 +43,17 @@ class _Stats:
 
 
 class _Engine:
-    """Shared matcher + correlator + notifier, with periodic CIDR reload."""
+    """Matcher + correlator feeding a single AlertSink (suppression + dedup +
+    dispatch), with periodic CIDR reload."""
     def __init__(self, store: Store, reload_every: int = 300, echo: bool = True,
-                 correlator: Correlator = None, notifier: Notifier = None):
+                 correlator: Correlator = None, notifier: Notifier = None,
+                 suppression: SuppressionList = None, deduper: Deduper = None):
         self.store = store
-        self.matcher = Matcher(store)
+        self.sink = AlertSink(store, suppression=suppression, deduper=deduper,
+                              notifier=notifier, echo=echo)
+        self.matcher = Matcher(store, sink=self.sink)
         self.correlator = correlator
-        self.notifier = notifier
         self.stats = _Stats()
-        self.echo = echo
         self._last_reload = time.time()
         self._reload_every = reload_every
         self._lock = threading.Lock()
@@ -60,30 +64,15 @@ class _Engine:
         if not line:
             return
         self._maybe_reload()
-        n = 0
-        # 1) IOC matches (contact with known-bad infrastructure)
-        for a in self.matcher.scan_line(line, context=f"[{device}] {line[:400]}"):
-            self._emit(a["observable"], a["ioc"], f"[{device}] {line[:400]}")
-            n += 1
+        ctx = f"[{device}] {line[:400]}"
+        # 1) IOC matches — matcher routes each hit through the sink
+        n = len(self.matcher.scan_line(line, context=ctx))
         # 2) correlation (behavioural patterns across many lines)
         if self.correlator:
             for ev in self.correlator.observe(line, device):
-                self.store.add_alert(ev["observable"], ev["ioc"], ev["context"])
-                self._emit(ev["observable"], ev["ioc"], ev["context"])
-                n += 1
+                if self.sink.handle(ev["observable"], ev["ioc"], ev["context"]) is not None:
+                    n += 1
         self.stats.record(device, n)
-
-    def _emit(self, observable: str, ioc: dict, context: str):
-        if self.echo:
-            print(f"  [ALERT] {str(context.split(']')[0].strip('[')):<15} "
-                  f"{observable:<38} {(ioc.get('severity') or '').upper():<9} "
-                  f"{ioc.get('threat','')} (src={ioc.get('source')})", flush=True)
-        if self.notifier:
-            self.notifier.notify({
-                "observable": observable, "threat": ioc.get("threat"),
-                "severity": ioc.get("severity"), "source": ioc.get("source"),
-                "ioc_type": ioc.get("ioc_type"), "context": context,
-            })
 
     def _maybe_reload(self):
         now = time.time()
@@ -121,9 +110,11 @@ class _TCPServer(socketserver.ThreadingTCPServer):
 def serve_syslog(store: Store, host: str = "0.0.0.0", port: int = 5140,
                  udp: bool = True, tcp: bool = True, echo: bool = True,
                  reload_every: int = 300, correlator: Correlator = None,
-                 notifier: Notifier = None):
+                 notifier: Notifier = None, suppression: SuppressionList = None,
+                 deduper: Deduper = None):
     engine = _Engine(store, reload_every=reload_every, echo=echo,
-                     correlator=correlator, notifier=notifier)
+                     correlator=correlator, notifier=notifier,
+                     suppression=suppression, deduper=deduper)
     servers = []
 
     if udp:
@@ -148,6 +139,10 @@ def serve_syslog(store: Store, host: str = "0.0.0.0", port: int = 5140,
     extras = []
     if correlator:
         extras.append(f"{len(correlator.rules)} correlation rule(s)")
+    if deduper:
+        extras.append(f"dedup {deduper.window}s")
+    if suppression and suppression.rules:
+        extras.append(f"{len(suppression.rules)} suppression rule(s)")
     if notifier and notifier.enabled:
         extras.append("alert dispatch ON")
     print("[ingest] matching against threat intel"
@@ -158,13 +153,18 @@ def serve_syslog(store: Store, host: str = "0.0.0.0", port: int = 5140,
     try:
         while True:
             time.sleep(30)
-            st = engine.stats
+            if deduper:
+                deduper.prune()
+            st, sk = engine.stats, engine.sink.summary()
             print(f"[ingest] {st.messages} msgs / {st.alerts} alerts "
-                  f"from {len(st.by_device)} device(s)", flush=True)
+                  f"from {len(st.by_device)} device(s) "
+                  f"(deduped {sk['deduped']}, suppressed {sk['suppressed']})",
+                  flush=True)
     except KeyboardInterrupt:
         print("\n[ingest] stopping...")
         for _, s in servers:
             s.shutdown()
             s.server_close()
-        st = engine.stats
-        print(f"[ingest] total: {st.messages} messages, {st.alerts} alerts")
+        st, sk = engine.stats, engine.sink.summary()
+        print(f"[ingest] total: {st.messages} messages, {sk['new']} alerts, "
+              f"{sk['deduped']} deduplicated, {sk['suppressed']} suppressed")

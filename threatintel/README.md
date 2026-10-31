@@ -136,6 +136,42 @@ python -m threatmgr test-alert --webhook "$THREATMGR_WEBHOOK"
 `--min-severity` (low|medium|high|critical) gates what gets dispatched. Dispatch
 failures are logged and never interrupt ingestion.
 
+## Alert deduplication & suppression
+
+To keep the console and webhook signal-rich, every candidate alert flows through
+a pipeline (`sink.py`) before it is stored or dispatched:
+
+1. **Suppression** — an allowlist / mute layer (`suppression.py`). Drop alerts
+   for known-good or operationally-noisy things.
+2. **Deduplication** — within a window, repeats of the same
+   `(type, observable, source)` collapse into **one** stored alert whose `count`
+   is incremented (shown as `×N` in the console). Only the first fires dispatch.
+
+```bash
+python -m threatmgr ingest \
+  --dedup-window 600 \                 # collapse repeats for 10 min (default 300)
+  --suppress-file suppression.json     # see suppression.sample.json
+# disable either:  --no-dedup
+```
+
+A suppression file is a JSON list of rules (copy `suppression.sample.json`):
+
+```json
+[
+  {"type": "cidr",          "match": "10.0.0.0/8",   "note": "internal"},
+  {"type": "value",         "match": "8.8.8.8"},
+  {"type": "value_regex",   "match": "^scanner\\d+\\."},
+  {"type": "source",        "match": "denied_burst"},
+  {"type": "threat_substr", "match": "test"},
+  {"type": "severity_below","match": "medium"},
+  {"type": "cidr", "match": "203.0.113.0/24", "until": 1767225600, "note": "maintenance window"}
+]
+```
+
+Any rule may carry `"until": <epoch seconds>` to act as a **temporary
+maintenance-window mute** that auto-expires. Live counts of deduplicated and
+suppressed alerts appear in the `ingest` status line.
+
 ## Proactive monitoring from the CLI
 
 ```bash
@@ -195,6 +231,8 @@ threatintel/
 │   ├── matcher.py     observable extraction + IOC matching (detection)
 │   ├── ingest.py      syslog server (UDP/TCP) — ingest device logs live
 │   ├── correlator.py  threshold/correlation rules (brute force, scans, bursts)
+│   ├── suppression.py allowlist / mute rules (+ maintenance windows)
+│   ├── sink.py        alert pipeline: suppression -> dedup -> store + dispatch
 │   ├── dispatch.py    outbound alerts (webhook / Slack / email)
 │   ├── server.py      web console + JSON API
 │   └── cli.py         command-line entry point

@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS alerts (
     severity      TEXT,
     source        TEXT,
     context       TEXT,                       -- raw log line / where it was seen
-    acknowledged  INTEGER DEFAULT 0
+    acknowledged  INTEGER DEFAULT 0,
+    count         INTEGER DEFAULT 1,          -- how many times deduplicated into this
+    last_ts       REAL                        -- most recent occurrence
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts);
 """
@@ -61,6 +63,16 @@ class Store:
         self._local = threading.local()
         with self._conn() as c:
             c.executescript(SCHEMA)
+            self._migrate(c)
+
+    @staticmethod
+    def _migrate(c):
+        """Add columns introduced after the first release to existing DBs."""
+        cols = {r[1] for r in c.execute("PRAGMA table_info(alerts)").fetchall()}
+        if "count" not in cols:
+            c.execute("ALTER TABLE alerts ADD COLUMN count INTEGER DEFAULT 1")
+        if "last_ts" not in cols:
+            c.execute("ALTER TABLE alerts ADD COLUMN last_ts REAL")
 
     def _get(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -187,18 +199,27 @@ class Store:
 
     # ---- alerts ---------------------------------------------------------
     def add_alert(self, observable: str, ioc: dict, context: str = "") -> int:
+        now = time.time()
         with self._conn() as c:
             cur = c.execute(
                 """
                 INSERT INTO alerts (ts, observable, ioc_id, ioc_value, ioc_type,
-                                    threat, severity, source, context)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                                    threat, severity, source, context, count, last_ts)
+                VALUES (?,?,?,?,?,?,?,?,?,1,?)
                 """,
-                (time.time(), observable, ioc.get("id"), ioc.get("value"),
+                (now, observable, ioc.get("id"), ioc.get("value"),
                  ioc.get("ioc_type"), ioc.get("threat"), ioc.get("severity"),
-                 ioc.get("source"), context),
+                 ioc.get("source"), context, now),
             )
             return cur.lastrowid
+
+    def bump_alert(self, alert_id: int):
+        """Increment the occurrence count of an existing (deduplicated) alert."""
+        with self._conn() as c:
+            c.execute(
+                "UPDATE alerts SET count = count + 1, last_ts = ? WHERE id = ?",
+                (time.time(), alert_id),
+            )
 
     def alerts(self, limit: int = 100, only_open: bool = False) -> list:
         where = "WHERE acknowledged=0" if only_open else ""
